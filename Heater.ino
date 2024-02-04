@@ -26,8 +26,13 @@
 //  | gnd|---|gnd|----|gnd|
 //  | GP4|---|SDA|----|SDA|
 //  | GP5|---|SCL|----|SCL|
-//  +----+   +---+    +---+
+//  |    |   +---+    +---+
+//  | GP6|--- Rotary Bttn
+//  | GP7|--- Rotary A
+//  | GP8|--- Rotary B
+//  +----+
 //
+// 
 
 #include <SPI.h>
 #include <Wire.h>
@@ -77,15 +82,104 @@ static const unsigned char PROGMEM logo_bmp[] =
 
 const int  debugPin = 0;           //GPIO 0
 const int  ControllerOutPin = 1;   //GPIO 1
+const int  Rot_Bttn = 6;           //GPIO 6
+const int  Rot_A = 7;              //GPIO 7
+const int  Rot_B = 8;              //GPIO 8
+
 float SetPoint = 30.0;
 float ActualVal = 0.0;
 float Controldiff = 0.0;
 
+bool LED = false;
 bool debug_akt = true;
+bool ChangeSetPoint = false;
+
+// Rotaryvariables
+bool rt_mov = false;
+volatile boolean rt_right = false;
+volatile boolean rt_left = false;
+volatile boolean rt_irdir = false;
+volatile byte rt_ccw = 0;
+volatile byte rt_cw = 0;
+volatile byte rt_inc = 0;
+volatile uint8_t rt_a = 0;
+volatile uint8_t rt_b = 0;
+
+// Button variables
+bool bt_mov = false;
+volatile boolean bt_irDir = false;
+bool bt_press = false;
+bool bt_releas = false;
+bool bt_shortpress = false;
+bool bt_longpress = false;
+volatile uint8_t bt_c = 0;
+uint32_t bt_timepressed = 0;
+uint32_t bt_timereleased = 0;
+uint32_t bt_deltatime = 0;
+
+// *************************** ISR's *******************************
+
+/* ISR Button
+   detection of falling and raising edge of Buttonpin              */
+void buttonEvent(){
+  bt_mov = true;
+  bt_c = digitalRead(Rot_Bttn);
+  if (bt_c == false) {
+    bt_press = true;
+  } else {
+    bt_releas = true;
+  }  
+  if (bt_irDir) {
+    attachInterrupt(Rot_Bttn, buttonEvent, RISING);
+    bt_irDir = false;
+  } else {
+    attachInterrupt(Rot_Bttn, buttonEvent, FALLING);
+    bt_irDir = true;
+    }
+  if(debug_akt){
+    Serial.print(bt_press);
+    Serial.print(bt_releas);
+    Serial.println(bt_irDir);
+  }
+}
+
+// ISR Rotary
+void rotaryMoved() {
+  // ISR for DDM427 See Datasheet https://hopt-schuler.com/sites/default/files/medien/dokumente/2022-11/miniature_2bit_encoder_427_2022.pdf
+  rt_mov = true;
+  rt_a = digitalRead(Rot_A);
+  rt_b = digitalRead(Rot_B);
+  if (rt_a == rt_b) {
+    rt_left = true;
+  } else {
+    rt_right = true;
+  }
+  if (rt_irdir) {
+    attachInterrupt(Rot_A, rotaryMoved, RISING);
+    rt_irdir = false;
+  } else {
+    attachInterrupt(Rot_B, rotaryMoved, FALLING);
+    rt_irdir = true;
+  }
+    if(debug_akt){
+    Serial.print(rt_left);
+    Serial.print(rt_right);
+    Serial.println(rt_irdir);
+  }
+}
+
+
 
 void setup() {
+// configure GPIO Pins    
     pinMode(debugPin,INPUT_PULLUP);
-    pinMode(ControllerOutPin,OUTPUT);
+    pinMode(ControllerOutPin,OUTPUT_8MA);  // must drive LED --> 8mA Currentlimit
+    pinMode(Rot_Bttn, INPUT_PULLUP);
+    attachInterrupt(Rot_Bttn, buttonEvent, CHANGE);
+    pinMode(Rot_A, INPUT_PULLUP);
+    attachInterrupt(Rot_A, rotaryMoved, CHANGE);
+    pinMode(Rot_B, INPUT_PULLUP);
+
     debug_akt = !(digitalRead(debugPin));  // debug wenn Pin connected to gnd
     Serial.begin(115200);
     while (!Serial & debug_akt) {
@@ -175,8 +269,24 @@ void setup() {
   if(debug_akt){Serial.println(F("------------------------------"));}
 }
 
+
 void loop() {
-    uint8_t status = mcp.getStatus();
+  if (bt_mov){
+    bt_mov = false;
+    Eventhandling_bt();}
+  
+  if (bt_shortpress){
+    bt_shortpress = false;
+  }
+  if (bt_longpress){
+    bt_longpress = false;
+    ChangeSetPoint = !ChangeSetPoint;
+  }
+  if (rt_mov){
+    rt_mov = false;
+    Eventhandling_rt();}
+
+  uint8_t status = mcp.getStatus();
   if(debug_akt){
     Serial.print("MCP Status: 0x"); 
     Serial.print(status, HEX);  
@@ -205,7 +315,6 @@ void loop() {
   delay(1000);
   temperatureControl();
   textdisplay();
-
 }
 
 
@@ -213,8 +322,8 @@ void temperatureControl(void){
   ActualVal = mcp.readThermocouple();
   Controldiff = SetPoint - ActualVal;
   if (ActualVal < SetPoint){
-    //digitalWrite(ControllerOutPin,HIGH);
-    analogWrite(ControllerOutPin,Controldiff);
+    digitalWrite(ControllerOutPin,HIGH);
+    //analogWrite(ControllerOutPin,Controldiff);
   } 
   else {
     digitalWrite(ControllerOutPin,LOW);
@@ -233,12 +342,60 @@ void textdisplay(void) {
   display.print("TC Hot : "); display.print(mcp.readThermocouple()); display.println("*C");
   display.print("TC Cold: "); display.print(mcp.readAmbient());; display.println("*C");
   display.print("ADC: "); display.print(mcp.readADC() * 2); display.println(" uV");  
+  if (ChangeSetPoint == true){
+    display.setTextColor(BLACK, WHITE);
+  } 
   display.print("SetPoint: "); display.print(SetPoint); display.println("*C");
+  display.setTextColor(SSD1306_WHITE);        // Draw white text    
   display.print("ActVal: "); display.print(ActualVal); display.println("*C"); 
   display.print("Controldiff: "); display.print(Controldiff); display.println("*C"); 
-
-
   display.display();
 }
 
+// handling ISR detected Buttonpresses
+void Eventhandling_bt(){
+  // looks for actions detected by ISR
+  // in case of btpress time saved
+  if (bt_press) {
+    bt_timepressed = millis();
+    bt_press = false;
+  //  tone(8,1000,50);
+  }
+  
+  // in case of bt_releas delta T is calculated 
+  // short- and longpress are determinated
+  if (bt_releas) {
+    bt_timereleased = millis();
+    bt_releas = false;
+    bt_deltatime = bt_timereleased - bt_timepressed;
+    if (bt_deltatime < 200) {
+      bt_shortpress = true;
+      bt_longpress = false;
+    }
+    else if(bt_deltatime > 250) {
+      bt_shortpress = false;
+      bt_longpress = true;
+    }
+  if(debug_akt){
+    Serial.print("Short - Longpress State: ");
+    Serial.print(bt_shortpress);
+    Serial.println(bt_longpress);
+  }  
+  }
+}
 
+// handling ISR detected Rotarymove
+void Eventhandling_rt(){
+  if (rt_left) {
+    rt_left = false;
+    rt_ccw++;
+    rt_inc++;
+    if (ChangeSetPoint){SetPoint++;}    
+  }
+    if (rt_right) {
+    rt_right = false;
+    rt_cw++;
+    rt_inc--;
+    if (ChangeSetPoint){SetPoint--;}
+  }    
+}
